@@ -16,8 +16,6 @@ public:
     void resized() override;
 
 private:
-    AsunderAudioProcessor& processor;
-
     AsunderLookAndFeel lookAndFeel;   // value member, declared before impl (destroyed last)
 
     class Impl;

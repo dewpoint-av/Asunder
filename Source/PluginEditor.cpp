@@ -20,8 +20,8 @@ namespace
     {
     public:
         Knob(juce::AudioProcessorValueTreeState& st, const juce::String& paramId,
-             const juce::String& name, std::function<juce::String(float)> textFn)
-            : stateRef(st), param(paramId), textFn(textFn)
+             const juce::String& name, std::function<juce::String(float)> textFnIn)
+            : stateRef(st), param(paramId), textFn(textFnIn)
         {
             slider.setSliderStyle(juce::Slider::Rotary);
             slider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
@@ -30,12 +30,12 @@ namespace
             addAndMakeVisible(slider);
 
             nameLabel.setText(name, juce::dontSendNotification);
-            nameLabel.setFont(juce::Font(11.0f, juce::Font::plain));
+            nameLabel.setFont(juce::FontOptions(11.0f, juce::Font::plain));
             nameLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
             nameLabel.setJustificationType(juce::Justification::centred);
             addAndMakeVisible(nameLabel);
 
-            valueLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+            valueLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
             valueLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::text);
             valueLabel.setJustificationType(juce::Justification::centred);
             addAndMakeVisible(valueLabel);
@@ -102,7 +102,7 @@ namespace
                 g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
             }
 
-            g.setFont(juce::Font(10.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.setFont(juce::FontOptions(10.0f, sel ? juce::Font::bold : juce::Font::plain));
             g.setColour(sel ? AsunderLookAndFeel::text : AsunderLookAndFeel::muted);
             g.drawText(name, r, juce::Justification::centred, false);
         }
@@ -227,7 +227,7 @@ private:
         title = std::make_unique<HoloTitle>("ASUNDER", 40.0f, true);
 
         subtitle.setText("MULTIBAND DISTORTION", juce::dontSendNotification);
-        subtitle.setFont(juce::Font(12.0f, juce::Font::bold));
+        subtitle.setFont(juce::FontOptions(12.0f, juce::Font::bold));
         subtitle.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
         subtitle.setJustificationType(juce::Justification::centred);
 
@@ -250,7 +250,7 @@ private:
         knobs.push_back(std::make_unique<Knob>(state, "output", "OUTPUT", gainText));
 
         bandsLabel.setText("BANDS", juce::dontSendNotification);
-        bandsLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+        bandsLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         bandsLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
         bandsLabel.setJustificationType(juce::Justification::centred);
 
@@ -274,11 +274,11 @@ private:
 
 // ===========================================================================
 AsunderAudioProcessorEditor::AsunderAudioProcessorEditor(AsunderAudioProcessor& p)
-    : AudioProcessorEditor(&p), processor(p)
+    : AudioProcessorEditor(&p)
 {
     setLookAndFeel(&lookAndFeel);
 
-    impl = std::make_unique<Impl>(processor);
+    impl = std::make_unique<Impl>(p);
     impl->attachTo(*this);
 
     setResizable(true, true);
