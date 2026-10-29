@@ -20,26 +20,35 @@ namespace asunder
 
     struct Params
     {
-        float drive  = 0.5f;     // 0..1
-        float tone   = 0.5f;     // 0 dark .. 1 bright
-        float bias   = 0.5f;     // 0.5 symmetric
-        float mix    = 1.0f;     // 0..1
-        float output = 1.0f;     // 0..2
-        int   type   = 2;        // 0..5
+        std::array<float, kMaxBands> drive {};   // 0..1  per band
+        std::array<float, kMaxBands> tone  {};   // 0 dark .. 1 bright, per band
+        std::array<float, kMaxBands> bias  {};   // 0.5 symmetric, per band
+        std::array<int,   kMaxBands> type  {};   // 0..5, per band
+        float mix    = 1.0f;     // 0..1  global
+        float output = 1.0f;     // 0..2  global
         int   bands  = 1;        // 1..5
         float xover0 = 300.0f;   // Hz
         float xover1 = 1000.0f;
         float xover2 = 3000.0f;
         float xover3 = 8000.0f;
 
+        Params()
+        {
+            drive.fill (0.5f);
+            tone.fill  (0.5f);
+            bias.fill  (0.5f);
+            type.fill  (2);
+        }
+
         bool operator== (const Params& o) const
         {
-            return drive  == o.drive
-                && tone   == o.tone
-                && bias   == o.bias
-                && mix    == o.mix
+            for (int i = 0; i < kMaxBands; ++i)
+                if (drive[i] != o.drive[i] || tone[i]  != o.tone[i]
+                    || bias[i] != o.bias[i] || type[i] != o.type[i])
+                    return false;
+
+            return mix    == o.mix
                 && output == o.output
-                && type   == o.type
                 && bands  == o.bands
                 && xover0 == o.xover0
                 && xover1 == o.xover1
@@ -89,19 +98,20 @@ namespace asunder
 
         struct Channel
         {
-            std::array<Biquad, kMaxBands - 1> lp;   // crossover lowpasses
-            float toneZ = 0.0f;                     // one-pole lowpass state
-            float dcX   = 0.0f;                     // DC blocker prev input
-            float dcY   = 0.0f;                     // DC blocker prev output
+            std::array<Biquad, kMaxBands - 1> lp;       // crossover lowpasses
+            std::array<float, kMaxBands> toneZ {};      // per-band one-pole lowpass state
+            float dcX = 0.0f;                            // DC blocker prev input
+            float dcY = 0.0f;                            // DC blocker prev output
         };
 
         void update (double sr);
+        float processBand (float x, int band, int chIdx);
 
         double sampleRate = 48000.0;
         Params p;
         int activeBands = 1;
-        float biasOffset = 0.0f;
-        float toneCoef = 0.0f;
+        std::array<float, kMaxBands> biasOffset {};
+        std::array<float, kMaxBands> toneCoef {};
         std::array<float, kMaxBands - 1> xover {};
 
         Channel ch[2];

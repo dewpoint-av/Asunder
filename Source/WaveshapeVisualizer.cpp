@@ -3,29 +3,53 @@
 #include "Distortion.h"
 #include "AsunderLookAndFeel.h"
 
+namespace
+{
+    juce::String perBandId (int bandOneBased, const char* what)
+    {
+        return "b" + juce::String(bandOneBased) + what;
+    }
+}
+
 WaveshapeVisualizer::WaveshapeVisualizer(juce::AudioProcessorValueTreeState& s)
     : state(s)
 {
-    state.addParameterListener("type", this);
-    state.addParameterListener("drive", this);
+    // Listen to the selected band's type/drive (retarget on setBand).
+    for (int b = 1; b <= 5; ++b)
+    {
+        state.addParameterListener(perBandId(b, "type"), this);
+        state.addParameterListener(perBandId(b, "drive"), this);
+    }
 }
 
 WaveshapeVisualizer::~WaveshapeVisualizer()
 {
-    state.removeParameterListener("type", this);
-    state.removeParameterListener("drive", this);
+    for (int b = 1; b <= 5; ++b)
+    {
+        state.removeParameterListener(perBandId(b, "type"), this);
+        state.removeParameterListener(perBandId(b, "drive"), this);
+    }
 }
+
+void WaveshapeVisualizer::setBand(int bandOneBased)
+{
+    band = juce::jlimit(1, 5, bandOneBased);
+    repaint();
+}
+
+juce::String WaveshapeVisualizer::typeParamId() const  { return perBandId(band, "type"); }
+juce::String WaveshapeVisualizer::driveParamId() const { return perBandId(band, "drive"); }
 
 float WaveshapeVisualizer::drive() const
 {
-    if (auto* p = state.getRawParameterValue("drive"))
+    if (auto* p = state.getRawParameterValue(driveParamId()))
         return p->load();
     return 0.5f;
 }
 
 int WaveshapeVisualizer::type() const
 {
-    if (auto* p = state.getRawParameterValue("type"))
+    if (auto* p = state.getRawParameterValue(typeParamId()))
         return juce::roundToInt(p->load());
     return 2;
 }

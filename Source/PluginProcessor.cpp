@@ -7,13 +7,40 @@ AsunderAudioProcessor::AsunderAudioProcessor()
         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
     , parameters(*this, nullptr, "Parameters",
         {
-            std::make_unique<juce::AudioParameterFloat>("drive", "Drive", 0.0f, 1.0f, 0.5f),
-            std::make_unique<juce::AudioParameterFloat>("tone", "Tone", 0.0f, 1.0f, 0.5f),
-            std::make_unique<juce::AudioParameterFloat>("bias", "Bias", 0.0f, 1.0f, 0.5f),
+            // Per-band distortion (5 bands). Each band has its own drive, tone,
+            // bias and distortion type, selected via the `band` parameter in the UI.
+            std::make_unique<juce::AudioParameterFloat>("b1drive", "Band 1 Drive", 0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b1tone",  "Band 1 Tone",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b1bias",  "Band 1 Bias",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterChoice>("b1type", "Band 1 Type",
+                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
+            std::make_unique<juce::AudioParameterFloat>("b2drive", "Band 2 Drive", 0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b2tone",  "Band 2 Tone",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b2bias",  "Band 2 Bias",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterChoice>("b2type", "Band 2 Type",
+                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
+            std::make_unique<juce::AudioParameterFloat>("b3drive", "Band 3 Drive", 0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b3tone",  "Band 3 Tone",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b3bias",  "Band 3 Bias",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterChoice>("b3type", "Band 3 Type",
+                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
+            std::make_unique<juce::AudioParameterFloat>("b4drive", "Band 4 Drive", 0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b4tone",  "Band 4 Tone",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b4bias",  "Band 4 Bias",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterChoice>("b4type", "Band 4 Type",
+                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
+            std::make_unique<juce::AudioParameterFloat>("b5drive", "Band 5 Drive", 0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b5tone",  "Band 5 Tone",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterFloat>("b5bias",  "Band 5 Bias",  0.0f, 1.0f, 0.5f),
+            std::make_unique<juce::AudioParameterChoice>("b5type", "Band 5 Type",
+                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
+
+            // UI: which band the editor is currently editing (1..5).
+            std::make_unique<juce::AudioParameterInt>("band", "Band", 1, 5, 1),
+
+            // Global.
             std::make_unique<juce::AudioParameterFloat>("mix", "Mix", 0.0f, 1.0f, 1.0f),
             std::make_unique<juce::AudioParameterFloat>("output", "Output", 0.0f, 2.0f, 1.0f),
-            std::make_unique<juce::AudioParameterChoice>("type", "Type",
-                juce::StringArray { "Hard Clip", "Soft Clip", "Tube", "Wave Fold", "Bit Crush", "Sample Rate" }, 2),
             std::make_unique<juce::AudioParameterInt>("bands", "Bands", 1, 5, 1),
             std::make_unique<juce::AudioParameterFloat>("xover1", "X-Over 1",
                 juce::NormalisableRange<float>(50.0f, 20000.0f, 0.0f, 0.30f), 300.0f),
@@ -65,12 +92,16 @@ void AsunderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     const auto param = [&](const char* id) { return parameters.getRawParameterValue(id)->load(); };
     asunder::Params p;
-    p.drive  = param("drive");
-    p.tone   = param("tone");
-    p.bias   = param("bias");
+    for (int b = 0; b < asunder::kMaxBands; ++b)
+    {
+        const juce::String s = juce::String(b + 1);
+        p.drive[static_cast<size_t>(b)] = param(("b" + s + "drive").toRawUTF8());
+        p.tone[static_cast<size_t>(b)]  = param(("b" + s + "tone").toRawUTF8());
+        p.bias[static_cast<size_t>(b)]  = param(("b" + s + "bias").toRawUTF8());
+        p.type[static_cast<size_t>(b)]  = juce::roundToInt(param(("b" + s + "type").toRawUTF8()));
+    }
     p.mix    = param("mix");
     p.output = param("output");
-    p.type   = juce::roundToInt(param("type"));
     p.bands  = juce::roundToInt(param("bands"));
     p.xover0 = param("xover1");
     p.xover1 = param("xover2");

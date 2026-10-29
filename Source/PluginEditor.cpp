@@ -13,6 +13,12 @@ namespace
     juce::String gainText (float v) { return juce::String(v, 2) + "x"; }
     juce::String hzText   (float v) { return juce::String(v, 0) + " Hz"; }
 
+    // Param id for a per-band control, e.g. band 1 -> "b1drive".
+    juce::String perBandId (int bandOneBased, const char* what)
+    {
+        return "b" + juce::String(bandOneBased) + what;
+    }
+
     // ---- a labelled rotary knob bound to a parameter ------------------------
     class Knob : public juce::Component,
                  private juce::AudioProcessorValueTreeState::Listener,
@@ -40,12 +46,20 @@ namespace
             valueLabel.setJustificationType(juce::Justification::centred);
             addAndMakeVisible(valueLabel);
 
-            attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(st, paramId, slider);
-            stateRef.addParameterListener(param, this);
-            refreshLabel();
+            attach();
         }
 
         ~Knob() override { stateRef.removeParameterListener(param, this); }
+
+        // Re-point this knob at a different parameter (used for per-band editing).
+        void retarget(const juce::String& newParamId)
+        {
+            if (param == newParamId)
+                return;
+            stateRef.removeParameterListener(param, this);
+            param = newParamId;
+            attach();
+        }
 
         void parameterChanged(const juce::String&, float) override { triggerAsyncUpdate(); }
         void handleAsyncUpdate() override { refreshLabel(); }
@@ -59,6 +73,13 @@ namespace
         }
 
     private:
+        void attach()
+        {
+            attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(stateRef, param, slider);
+            stateRef.addParameterListener(param, this);
+            refreshLabel();
+        }
+
         void refreshLabel()
         {
             if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(stateRef.getParameter(param)))
@@ -75,12 +96,14 @@ namespace
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
-    // ---- a distortion-type selector button ---------------------------------
+    // ---- a distortion-type selector button (for the selected band) ----------
     class TypeButton : public juce::Component
     {
     public:
         TypeButton(const juce::String& label, int typeId, juce::AudioProcessorValueTreeState& st)
             : name(label), id(typeId), state(st) {}
+
+        void setBand(int bandOneBased) { band = bandOneBased; repaint(); }
 
         void paint(juce::Graphics& g) override
         {
@@ -109,13 +132,13 @@ namespace
 
         void mouseDown(const juce::MouseEvent&) override
         {
-            if (auto* p = state.getParameter("type"))
+            if (auto* p = state.getParameter(perBandId(band, "type")))
                 p->setValueNotifyingHost(static_cast<float>(id) / static_cast<float>(asunder::kNumDistortionTypes - 1));
         }
 
         bool selected() const
         {
-            if (auto* p = state.getRawParameterValue("type"))
+            if (auto* p = state.getRawParameterValue(perBandId(band, "type")))
                 return juce::roundToInt(p->load()) == id;
             return false;
         }
@@ -123,6 +146,7 @@ namespace
     private:
         juce::String name;
         int id;
+        int band = 1;
         juce::AudioProcessorValueTreeState& state;
     };
 }
@@ -135,19 +159,30 @@ public:
     explicit Impl(AsunderAudioProcessor& p) : processor(p), state(p.getState())
     {
         build();
+        applyBand(currentBand());
     }
 
     ~Impl() override
     {
-        state.removeParameterListener("type", this);
+        state.removeParameterListener("band", this);
+        for (int b = 1; b <= asunder::kMaxBands; ++b)
+            state.removeParameterListener(perBandId(b, "type"), this);
     }
 
     void parameterChanged(const juce::String&, float) override { triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override
     {
-        for (auto& b : typeButtons)
-            b->repaint();
+        const int b = currentBand();
+        if (b != bandKnobsBand)
+        {
+            applyBand(b);
+        }
+        else
+        {
+            for (auto& k : bandKnobs) k->repaint();
+            for (auto& t : typeButtons) t->repaint();
+        }
     }
 
     void attachTo(juce::Component& root)
@@ -157,11 +192,14 @@ public:
         root.addAndMakeVisible(brand);
         root.addAndMakeVisible(footer);
         root.addAndMakeVisible(*visualizer);
+        root.addAndMakeVisible(bandLabel);
+        root.addAndMakeVisible(bandCombo);
         root.addAndMakeVisible(bandsLabel);
         root.addAndMakeVisible(bandsCombo);
-        for (auto& k : knobs)        root.addAndMakeVisible(*k);
-        for (auto& k : xoverKnobs)   root.addAndMakeVisible(*k);
-        for (auto& b : typeButtons)  root.addAndMakeVisible(*b);
+        for (auto& k : bandKnobs)      root.addAndMakeVisible(*k);
+        for (auto& k : globalKnobs)    root.addAndMakeVisible(*k);
+        for (auto& k : xoverKnobs)     root.addAndMakeVisible(*k);
+        for (auto& b : typeButtons)    root.addAndMakeVisible(*b);
     }
 
     void resized(juce::Rectangle<int> bounds)
@@ -187,24 +225,23 @@ public:
         title->setBounds(header.removeFromTop(44));
         subtitle.setBounds(header.removeFromTop(22));
 
-        // Type buttons row.
-        auto typeRow = b.removeFromTop(42);
-        const int nt = static_cast<int>(typeButtons.size());
-        const int bw = nt > 0 ? typeRow.getWidth() / nt : 0;
-        for (int i = 0; i < nt; ++i)
-            typeButtons[static_cast<size_t>(i)]->setBounds(typeRow.removeFromLeft(bw).reduced(3, 3));
+        // Band selector + type buttons row.
+        auto bandRow = b.removeFromTop(66);
+        auto bandArea = bandRow.removeFromLeft(120);
+        bandLabel.setBounds(bandArea.removeFromTop(16));
+        bandCombo.setBounds(bandArea.reduced(6, 2).removeFromTop(28));
 
-        // Knobs (3 x 2 grid) on the right; waveshape visualizer on the left.
-        auto knobsArea = b.removeFromRight(static_cast<int>(b.getWidth() * 0.55f));
-        const int cols = 3, rows = 2, gap = 10;
-        const int cw2 = (knobsArea.getWidth()  - gap * (cols - 1)) / cols;
-        const int ch2 = (knobsArea.getHeight() - gap * (rows - 1)) / rows;
-        int idx = 0;
-        for (int r = 0; r < rows; ++r)
-            for (int c = 0; c < cols && idx < static_cast<int>(knobs.size()); ++c, ++idx)
-                knobs[static_cast<size_t>(idx)]->setBounds(knobsArea.getX() + c * (cw2 + gap),
-                                                           knobsArea.getY() + r * (ch2 + gap),
-                                                           cw2, ch2);
+        const int nt = static_cast<int>(typeButtons.size());
+        const int bw = nt > 0 ? bandRow.getWidth() / nt : 0;
+        for (int i = 0; i < nt; ++i)
+            typeButtons[static_cast<size_t>(i)]->setBounds(bandRow.removeFromLeft(bw).reduced(3, 3));
+
+        // Band knobs (3) + global knobs (2) in one row on the right; visualizer left.
+        auto knobsArea = b.removeFromRight(static_cast<int>(b.getWidth() * 0.62f));
+        const int nk = static_cast<int>(bandKnobs.size() + globalKnobs.size());
+        const int kw = nk > 0 ? knobsArea.getWidth() / nk : 0;
+        for (auto& k : bandKnobs)   k->setBounds(knobsArea.removeFromLeft(kw).reduced(4, 2));
+        for (auto& k : globalKnobs) k->setBounds(knobsArea.removeFromLeft(kw).reduced(4, 2));
 
         visualizer->setBounds(b.reduced(6));
     }
@@ -214,13 +251,35 @@ private:
     juce::AudioProcessorValueTreeState& state;
 
     std::unique_ptr<HoloTitle> title;
-    juce::Label subtitle, brand, footer, bandsLabel;
+    juce::Label subtitle, brand, footer, bandLabel, bandsLabel;
     std::unique_ptr<WaveshapeVisualizer> visualizer;
-    juce::ComboBox bandsCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bandsAttachment;
-    std::vector<std::unique_ptr<Knob>> knobs;
+    juce::ComboBox bandCombo, bandsCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bandAttachment, bandsAttachment;
+    std::vector<std::unique_ptr<Knob>> bandKnobs;    // drive, tone, bias (per selected band)
+    std::vector<std::unique_ptr<Knob>> globalKnobs;  // mix, output
     std::vector<std::unique_ptr<Knob>> xoverKnobs;
     std::vector<std::unique_ptr<TypeButton>> typeButtons;
+
+    int bandKnobsBand = 1;
+
+    int currentBand() const
+    {
+        if (auto* p = state.getRawParameterValue("band"))
+            return juce::jlimit(1, asunder::kMaxBands, juce::roundToInt(p->load()));
+        return 1;
+    }
+
+    void applyBand(int band)
+    {
+        bandKnobsBand = band;
+
+        bandKnobs[0]->retarget(perBandId(band, "drive"));
+        bandKnobs[1]->retarget(perBandId(band, "tone"));
+        bandKnobs[2]->retarget(perBandId(band, "bias"));
+        for (auto& t : typeButtons)
+            t->setBand(band);
+        visualizer->setBand(band);
+    }
 
     void build()
     {
@@ -242,13 +301,29 @@ private:
         footer.setJustificationType(juce::Justification::centred);
 
         visualizer = std::make_unique<WaveshapeVisualizer>(state);
+        visualizer->setBand(1);
 
-        knobs.push_back(std::make_unique<Knob>(state, "drive",  "DRIVE",  pctText));
-        knobs.push_back(std::make_unique<Knob>(state, "tone",   "TONE",   pctText));
-        knobs.push_back(std::make_unique<Knob>(state, "bias",   "BIAS",   pctText));
-        knobs.push_back(std::make_unique<Knob>(state, "mix",    "MIX",    pctText));
-        knobs.push_back(std::make_unique<Knob>(state, "output", "OUTPUT", gainText));
+        // Per-band knobs (retargeted when the band changes).
+        bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "drive"), "DRIVE", pctText));
+        bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "tone"),  "TONE",  pctText));
+        bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "bias"),  "BIAS",  pctText));
 
+        // Global knobs.
+        globalKnobs.push_back(std::make_unique<Knob>(state, "mix",    "MIX",    pctText));
+        globalKnobs.push_back(std::make_unique<Knob>(state, "output", "OUTPUT", gainText));
+
+        // Band selector.
+        bandLabel.setText("EDIT BAND", juce::dontSendNotification);
+        bandLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        bandLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
+        bandLabel.setJustificationType(juce::Justification::centred);
+
+        for (int i = 1; i <= asunder::kMaxBands; ++i)
+            bandCombo.addItem("BAND " + juce::String(i), i);
+        bandCombo.setSelectedId(1);
+        bandAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(state, "band", bandCombo);
+
+        // Active-band count selector.
         bandsLabel.setText("BANDS", juce::dontSendNotification);
         bandsLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         bandsLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
@@ -268,7 +343,10 @@ private:
         for (int i = 0; i < asunder::kNumDistortionTypes; ++i)
             typeButtons.push_back(std::make_unique<TypeButton>(typeNames[i], i, state));
 
-        state.addParameterListener("type", this);
+        // Repaint band controls when the band or its type changes.
+        state.addParameterListener("band", this);
+        for (int b = 1; b <= asunder::kMaxBands; ++b)
+            state.addParameterListener(perBandId(b, "type"), this);
     }
 };
 

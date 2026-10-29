@@ -15,7 +15,7 @@ namespace asunder
         {
             for (auto& f : c.lp)
                 f.reset();
-            c.toneZ = 0.0f;
+            c.toneZ.fill (0.0f);
             c.dcX = 0.0f;
             c.dcY = 0.0f;
         }
@@ -35,13 +35,18 @@ namespace asunder
 
         activeBands = std::clamp (p.bands, 1, kMaxBands);
 
-        // Bias: a small DC offset (-0.3 .. 0.3) drives asymmetric waveshaping
-        // for even-harmonic richness; the DC blocker removes it afterwards.
-        biasOffset = (p.bias - 0.5f) * 0.6f;
+        // Per-band bias: a small DC offset (-0.3 .. 0.3) drives asymmetric
+        // waveshaping for even-harmonic richness; the DC blocker removes it
+        // afterwards.
+        for (int b = 0; b < kMaxBands; ++b)
+            biasOffset[static_cast<size_t> (b)] = (p.bias[static_cast<size_t> (b)] - 0.5f) * 0.6f;
 
-        // Tone: one-pole lowpass from 800 Hz (dark) to ~9.6 kHz (bright).
-        const float toneFreq = 800.0f * std::pow (12.0f, p.tone);
-        toneCoef = std::exp (-2.0f * 3.14159265358979323846f * toneFreq / fs);
+        // Per-band tone: one-pole lowpass from 800 Hz (dark) to ~9.6 kHz (bright).
+        for (int b = 0; b < kMaxBands; ++b)
+        {
+            const float toneFreq = 800.0f * std::pow (12.0f, p.tone[static_cast<size_t> (b)]);
+            toneCoef[static_cast<size_t> (b)] = std::exp (-2.0f * 3.14159265358979323846f * toneFreq / fs);
+        }
 
         // Sort the crossovers and configure the lowpasses.
         std::array<float, kMaxBands - 1> raw { p.xover0, p.xover1, p.xover2, p.xover3 };
@@ -60,8 +65,6 @@ namespace asunder
     {
         const int   nb     = activeBands;
         const int   nx     = nb - 1;      // active crossovers
-        const int   type   = p.type;
-        const float drive  = p.drive;
         const float mix    = p.mix;
         const float output = p.output;
 
@@ -70,39 +73,47 @@ namespace asunder
             for (int c = 0; c < 2; ++c)
             {
                 const float dry = (c == 0) ? inL[s] : inR[s];
-                const float x   = dry + biasOffset;
 
-                // Split into bands.
+                // Split into bands (no bias yet — bias is applied per band).
                 float low[kMaxBands - 1];
                 for (int j = 0; j < nx; ++j)
-                    low[j] = ch[c].lp[static_cast<size_t> (j)].process (x);
+                    low[j] = ch[c].lp[static_cast<size_t> (j)].process (dry);
 
                 float wet = 0.0f;
                 if (nb == 1)
                 {
-                    wet = transfer (x, type, drive);
+                    wet = processBand (dry, 0, c);
                 }
                 else
                 {
-                    wet  = transfer (low[0], type, drive);                    // low band
+                    wet  = processBand (low[0], 0, c);                       // low band
                     for (int j = 1; j < nx; ++j)
-                        wet += transfer (low[j] - low[j - 1], type, drive);   // mid bands
-                    wet += transfer (x - low[nx - 1], type, drive);           // high band
+                        wet += processBand (low[j] - low[j - 1], j, c);      // mid bands
+                    wet += processBand (dry - low[nx - 1], nx, c);           // high band
                 }
 
-                // DC blocker (removes the bias offset's DC).
+                // DC blocker (removes the summed bias offsets' DC).
                 const float d = wet - ch[c].dcX + 0.995f * ch[c].dcY;
                 ch[c].dcX = wet;
                 ch[c].dcY = d;
 
-                // Tone (one-pole lowpass).
-                const float t = (1.0f - toneCoef) * d + toneCoef * ch[c].toneZ;
-                ch[c].toneZ = t;
-
-                const float out = std::clamp ((dry * (1.0f - mix) + t * mix) * output, -1.0f, 1.0f);
+                const float out = std::clamp ((dry * (1.0f - mix) + d * mix) * output, -1.0f, 1.0f);
                 if (c == 0) outL[s] = out; else outR[s] = out;
             }
         }
+    }
+
+    float DistortionEngine::processBand (float x, int band, int chIdx)
+    {
+        // Per-band bias offset, then the waveshaper, then the per-band tone.
+        const float biased = x + biasOffset[static_cast<size_t> (band)];
+        const float shaped = transfer (biased, p.type[static_cast<size_t> (band)],
+                                       p.drive[static_cast<size_t> (band)]);
+
+        const float coef = toneCoef[static_cast<size_t> (band)];
+        const float t = (1.0f - coef) * shaped + coef * ch[chIdx].toneZ[static_cast<size_t> (band)];
+        ch[chIdx].toneZ[static_cast<size_t> (band)] = t;
+        return t;
     }
 
 } // namespace asunder
