@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Asunder VERSION 1.1.0)
+project(Asunder VERSION 1.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,7 +60,9 @@ target_sources(Asunder
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
         Source/WaveshapeVisualizer.cpp
+        Source/TapeVisualizer.cpp
         Source/dsp/DistortionEngine.cpp
+        Source/dsp/TapeEngine.cpp
 )
 
 target_include_directories(Asunder

@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 
 #include "WaveshapeVisualizer.h"
+#include "TapeVisualizer.h"
 #include "HoloLogo.h"
 
 #include <cmath>
@@ -13,10 +14,21 @@ namespace
     juce::String gainText (float v) { return juce::String(v, 2) + "x"; }
     juce::String hzText   (float v) { return juce::String(v, 0) + " Hz"; }
 
-    // Param id for a per-band control, e.g. band 1 -> "b1drive".
     juce::String perBandId (int bandOneBased, const char* what)
     {
         return "b" + juce::String(bandOneBased) + what;
+    }
+
+    // Per-tape-colour accent colours (also tint the visualizer).
+    juce::Colour colourForTape (int c)
+    {
+        switch (c)
+        {
+            case 1:  return juce::Colour (0xffffcf6e);   // Tube  — gold
+            case 2:  return juce::Colour (0xff5ec8ff);   // FET   — cyan
+            case 3:  return juce::Colour (0xffff6ea8);   // Class A — magenta
+            default: return juce::Colour (0xffff9e5e);   // Tape  — amber
+        }
     }
 
     // ---- a labelled rotary knob bound to a parameter ------------------------
@@ -51,7 +63,6 @@ namespace
 
         ~Knob() override { stateRef.removeParameterListener(param, this); }
 
-        // Re-point this knob at a different parameter (used for per-band editing).
         void retarget(const juce::String& newParamId)
         {
             if (param == newParamId)
@@ -96,14 +107,20 @@ namespace
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
-    // ---- a distortion-type selector button (for the selected band) ----------
-    class TypeButton : public juce::Component
+    // ---- a generic choice-parameter button (distortion type / tape colour / mode) ----
+    class ChoiceButton : public juce::Component
     {
     public:
-        TypeButton(const juce::String& label, int typeId, juce::AudioProcessorValueTreeState& st)
-            : name(label), id(typeId), state(st) {}
+        ChoiceButton(juce::AudioProcessorValueTreeState& st, juce::String paramId,
+                     juce::String label, int index, juce::Colour accentColour,
+                     float textSize = 10.0f)
+            : state(st), param(std::move(paramId)), name(std::move(label)),
+              id(index), accent(accentColour), fontSize(textSize) {}
 
-        void setBand(int bandOneBased) { band = bandOneBased; repaint(); }
+        std::function<void()> onClick;
+
+        void setAccent(juce::Colour c) { accent = c; repaint(); }
+        void setParam(juce::String newParamId) { param = std::move(newParamId); repaint(); }
 
         void paint(juce::Graphics& g) override
         {
@@ -112,9 +129,9 @@ namespace
 
             if (sel)
             {
-                g.setColour(AsunderLookAndFeel::accent.withAlpha(0.16f));
+                g.setColour(accent.withAlpha(0.18f));
                 g.fillRoundedRectangle(r, 7.0f);
-                g.setColour(AsunderLookAndFeel::accent.withAlpha(0.7f));
+                g.setColour(accent.withAlpha(0.8f));
                 g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.5f);
             }
             else
@@ -125,29 +142,31 @@ namespace
                 g.drawRoundedRectangle(r.reduced(0.5f), 7.0f, 1.0f);
             }
 
-            g.setFont(juce::FontOptions(10.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.setFont(juce::FontOptions(fontSize, sel ? juce::Font::bold : juce::Font::plain));
             g.setColour(sel ? AsunderLookAndFeel::text : AsunderLookAndFeel::muted);
             g.drawText(name, r, juce::Justification::centred, false);
         }
 
         void mouseDown(const juce::MouseEvent&) override
         {
-            if (auto* p = state.getParameter(perBandId(band, "type")))
-                p->setValueNotifyingHost(static_cast<float>(id) / static_cast<float>(asunder::kNumDistortionTypes - 1));
+            if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(state.getParameter(param)))
+                p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(id)));
+            if (onClick) onClick();
         }
 
         bool selected() const
         {
-            if (auto* p = state.getRawParameterValue(perBandId(band, "type")))
+            if (auto* p = state.getRawParameterValue(param))
                 return juce::roundToInt(p->load()) == id;
             return false;
         }
 
     private:
-        juce::String name;
-        int id;
-        int band = 1;
         juce::AudioProcessorValueTreeState& state;
+        juce::String param, name;
+        int id;
+        juce::Colour accent;
+        float fontSize;
     };
 }
 
@@ -160,11 +179,15 @@ public:
     {
         build();
         applyBand(currentBand());
+        updateMode(currentMode());
+        updateAccent();
     }
 
     ~Impl() override
     {
         state.removeParameterListener("band", this);
+        state.removeParameterListener("mode", this);
+        state.removeParameterListener("tapeColor", this);
         for (int b = 1; b <= asunder::kMaxBands; ++b)
             state.removeParameterListener(perBandId(b, "type"), this);
     }
@@ -173,16 +196,19 @@ public:
 
     void handleAsyncUpdate() override
     {
+        const int m = currentMode();
+        if (m != shownMode)
+            updateMode(m);
+
+        updateAccent();
+
         const int b = currentBand();
         if (b != bandKnobsBand)
-        {
             applyBand(b);
-        }
         else
-        {
-            for (auto& k : bandKnobs) k->repaint();
-            for (auto& t : typeButtons) t->repaint();
-        }
+            for (auto& k : typeButtons) k->repaint();
+
+        for (auto& c : colorButtons) c->repaint();
     }
 
     void attachTo(juce::Component& root)
@@ -191,24 +217,154 @@ public:
         root.addAndMakeVisible(subtitle);
         root.addAndMakeVisible(brand);
         root.addAndMakeVisible(footer);
+        root.addAndMakeVisible(*modeDist);
+        root.addAndMakeVisible(*modeTape);
+        root.addAndMakeVisible(qualityLabel);
+        root.addAndMakeVisible(qualityCombo);
+
+        // Distortion page.
         root.addAndMakeVisible(*visualizer);
         root.addAndMakeVisible(bandLabel);
         root.addAndMakeVisible(bandCombo);
         root.addAndMakeVisible(bandsLabel);
         root.addAndMakeVisible(bandsCombo);
-        for (auto& k : bandKnobs)      root.addAndMakeVisible(*k);
-        for (auto& k : globalKnobs)    root.addAndMakeVisible(*k);
-        for (auto& k : xoverKnobs)     root.addAndMakeVisible(*k);
-        for (auto& b : typeButtons)    root.addAndMakeVisible(*b);
+        for (auto& k : bandKnobs)   root.addAndMakeVisible(*k);
+        for (auto& k : globalKnobs) root.addAndMakeVisible(*k);
+        for (auto& k : xoverKnobs)  root.addAndMakeVisible(*k);
+        for (auto& b : typeButtons) root.addAndMakeVisible(*b);
+
+        // Tape page.
+        root.addAndMakeVisible(*tapeVis);
+        for (auto& b : colorButtons) root.addAndMakeVisible(*b);
+        for (auto& k : tapeKnobs)    root.addAndMakeVisible(*k);
     }
 
     void resized(juce::Rectangle<int> bounds)
     {
         auto b = bounds.reduced(16);
-
         footer.setBounds(b.removeFromBottom(18));
 
-        // Multiband row: bands selector + crossover knobs.
+        // Header.
+        auto header = b.removeFromTop(84);
+        brand.setBounds(header.removeFromTop(18));
+        title->setBounds(header.removeFromTop(44));
+        subtitle.setBounds(header.removeFromTop(22));
+
+        // Mode row: DISTORTION | TAPE on the left, Quality on the right.
+        auto modeRow = b.removeFromTop(40);
+        auto qArea = modeRow.removeFromRight(190);
+        qualityLabel.setBounds(qArea.removeFromLeft(60).withSizeKeepingCentre(60, 18));
+        qualityCombo.setBounds(qArea.reduced(2, 5));
+        auto toggles = modeRow.removeFromLeft(260);
+        modeDist->setBounds(toggles.removeFromLeft(128).reduced(3));
+        modeTape->setBounds(toggles.removeFromLeft(128).reduced(3));
+
+        b.removeFromTop(6);
+
+        if (shownMode == 1) layoutTape(b);
+        else                layoutDistortion(b);
+    }
+
+private:
+    AsunderAudioProcessor& processor;
+    juce::AudioProcessorValueTreeState& state;
+
+    std::unique_ptr<HoloTitle> title;
+    juce::Label subtitle, brand, footer, bandLabel, bandsLabel, qualityLabel;
+
+    // Mode + quality.
+    std::unique_ptr<ChoiceButton> modeDist, modeTape;
+    juce::ComboBox qualityCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAttachment;
+
+    // Distortion page.
+    std::unique_ptr<WaveshapeVisualizer> visualizer;
+    juce::ComboBox bandCombo, bandsCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bandAttachment, bandsAttachment;
+    std::vector<std::unique_ptr<Knob>> bandKnobs;
+    std::vector<std::unique_ptr<Knob>> globalKnobs;
+    std::vector<std::unique_ptr<Knob>> xoverKnobs;
+    std::vector<std::unique_ptr<ChoiceButton>> typeButtons;
+
+    // Tape page.
+    std::unique_ptr<TapeVisualizer> tapeVis;
+    std::vector<std::unique_ptr<ChoiceButton>> colorButtons;
+    std::vector<std::unique_ptr<Knob>> tapeKnobs;   // drive,bias,tone,bump,punch,wow,hiss,mix,output
+
+    int bandKnobsBand = 1;
+    int shownMode = -1;
+
+    int currentBand() const
+    {
+        if (auto* p = state.getRawParameterValue("band"))
+            return juce::jlimit(1, asunder::kMaxBands, juce::roundToInt(p->load()));
+        return 1;
+    }
+
+    int currentMode() const
+    {
+        if (auto* p = state.getRawParameterValue("mode"))
+            return juce::jlimit(0, 1, juce::roundToInt(p->load()));
+        return 0;
+    }
+
+    int currentColor() const
+    {
+        if (auto* p = state.getRawParameterValue("tapeColor"))
+            return juce::jlimit(0, asunder::kNumTapeColors - 1, juce::roundToInt(p->load()));
+        return 0;
+    }
+
+    void applyBand(int band)
+    {
+        bandKnobsBand = band;
+        bandKnobs[0]->retarget(perBandId(band, "drive"));
+        bandKnobs[1]->retarget(perBandId(band, "tone"));
+        bandKnobs[2]->retarget(perBandId(band, "bias"));
+        for (auto& t : typeButtons)
+            t->setParam(perBandId(band, "type"));
+        visualizer->setBand(band);
+    }
+
+    void updateAccent()
+    {
+        const auto col = colourForTape(currentColor());
+        if (tapeVis) tapeVis->setAccentColour(col);
+        for (auto& b : colorButtons) b->repaint();
+    }
+
+    void setPageVisible(bool tape)
+    {
+        // Distortion page.
+        visualizer->setVisible(! tape);
+        bandLabel.setVisible(! tape);  bandCombo.setVisible(! tape);
+        bandsLabel.setVisible(! tape); bandsCombo.setVisible(! tape);
+        for (auto& k : bandKnobs)   k->setVisible(! tape);
+        for (auto& k : globalKnobs) k->setVisible(! tape);
+        for (auto& k : xoverKnobs)  k->setVisible(! tape);
+        for (auto& b : typeButtons) b->setVisible(! tape);
+
+        // Tape page.
+        tapeVis->setVisible(tape);
+        for (auto& b : colorButtons) b->setVisible(tape);
+        for (auto& k : tapeKnobs)    k->setVisible(tape);
+    }
+
+    void updateMode(int mode)
+    {
+        shownMode = mode;
+        subtitle.setText(mode == 1 ? "ANALOG TAPE SATURATION" : "MULTIBAND DISTORTION",
+                         juce::dontSendNotification);
+        setPageVisible(mode == 1);
+        if (auto* parent = title->getParentComponent())
+            parent->resized();
+        modeDist->repaint();
+        modeTape->repaint();
+    }
+
+    // ---- distortion layout (original) -------------------------------------
+    void layoutDistortion(juce::Rectangle<int> b)
+    {
         auto mb = b.removeFromBottom(112);
         auto bandsArea = mb.removeFromLeft(128);
         bandsLabel.setBounds(bandsArea.removeFromTop(16));
@@ -219,13 +375,6 @@ public:
         for (int i = 0; i < ncx; ++i)
             xoverKnobs[static_cast<size_t>(i)]->setBounds(mb.removeFromLeft(cw).reduced(4, 2));
 
-        // Header.
-        auto header = b.removeFromTop(96);
-        brand.setBounds(header.removeFromTop(18));
-        title->setBounds(header.removeFromTop(44));
-        subtitle.setBounds(header.removeFromTop(22));
-
-        // Band selector + type buttons row.
         auto bandRow = b.removeFromTop(66);
         auto bandArea = bandRow.removeFromLeft(120);
         bandLabel.setBounds(bandArea.removeFromTop(16));
@@ -236,7 +385,6 @@ public:
         for (int i = 0; i < nt; ++i)
             typeButtons[static_cast<size_t>(i)]->setBounds(bandRow.removeFromLeft(bw).reduced(3, 3));
 
-        // Band knobs (3) + global knobs (2) in one row on the right; visualizer left.
         auto knobsArea = b.removeFromRight(static_cast<int>(b.getWidth() * 0.62f));
         const int nk = static_cast<int>(bandKnobs.size() + globalKnobs.size());
         const int kw = nk > 0 ? knobsArea.getWidth() / nk : 0;
@@ -246,39 +394,35 @@ public:
         visualizer->setBounds(b.reduced(6));
     }
 
-private:
-    AsunderAudioProcessor& processor;
-    juce::AudioProcessorValueTreeState& state;
-
-    std::unique_ptr<HoloTitle> title;
-    juce::Label subtitle, brand, footer, bandLabel, bandsLabel;
-    std::unique_ptr<WaveshapeVisualizer> visualizer;
-    juce::ComboBox bandCombo, bandsCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bandAttachment, bandsAttachment;
-    std::vector<std::unique_ptr<Knob>> bandKnobs;    // drive, tone, bias (per selected band)
-    std::vector<std::unique_ptr<Knob>> globalKnobs;  // mix, output
-    std::vector<std::unique_ptr<Knob>> xoverKnobs;
-    std::vector<std::unique_ptr<TypeButton>> typeButtons;
-
-    int bandKnobsBand = 1;
-
-    int currentBand() const
+    // ---- tape layout ------------------------------------------------------
+    void layoutTape(juce::Rectangle<int> b)
     {
-        if (auto* p = state.getRawParameterValue("band"))
-            return juce::jlimit(1, asunder::kMaxBands, juce::roundToInt(p->load()));
-        return 1;
-    }
+        // Colour selector row.
+        auto colorRow = b.removeFromTop(40);
+        const int nc = static_cast<int>(colorButtons.size());
+        const int cwi = nc > 0 ? colorRow.getWidth() / nc : 0;
+        for (int i = 0; i < nc; ++i)
+            colorButtons[static_cast<size_t>(i)]->setBounds(colorRow.removeFromLeft(cwi).reduced(4, 3));
 
-    void applyBand(int band)
-    {
-        bandKnobsBand = band;
+        b.removeFromTop(6);
 
-        bandKnobs[0]->retarget(perBandId(band, "drive"));
-        bandKnobs[1]->retarget(perBandId(band, "tone"));
-        bandKnobs[2]->retarget(perBandId(band, "bias"));
-        for (auto& t : typeButtons)
-            t->setBand(band);
-        visualizer->setBand(band);
+        // Visualizer left, knob grid right.
+        auto knobsArea = b.removeFromRight(static_cast<int>(b.getWidth() * 0.60f));
+        tapeVis->setBounds(b.reduced(6));
+
+        const int n = static_cast<int>(tapeKnobs.size());   // 9
+        const int cols = 3;
+        const int rows = (n + cols - 1) / cols;
+        const int cwid = knobsArea.getWidth() / cols;
+        const int chei = knobsArea.getHeight() / rows;
+        for (int i = 0; i < n; ++i)
+        {
+            const int r = i / cols;
+            const int c = i % cols;
+            juce::Rectangle<int> cell (knobsArea.getX() + c * cwid,
+                                       knobsArea.getY() + r * chei, cwid, chei);
+            tapeKnobs[static_cast<size_t>(i)]->setBounds(cell.reduced(4, 2));
+        }
     }
 
     void build()
@@ -300,19 +444,28 @@ private:
         footer.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
         footer.setJustificationType(juce::Justification::centred);
 
+        // Mode toggle.
+        modeDist = std::make_unique<ChoiceButton>(state, "mode", "DISTORTION", 0, AsunderLookAndFeel::accent, 12.0f);
+        modeTape = std::make_unique<ChoiceButton>(state, "mode", "TAPE",       1, AsunderLookAndFeel::accent, 12.0f);
+
+        // Quality selector.
+        qualityLabel.setText("QUALITY", juce::dontSendNotification);
+        qualityLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        qualityLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
+        qualityLabel.setJustificationType(juce::Justification::centredRight);
+        qualityCombo.addItemList({ "Draft 1x", "Standard 2x", "High 4x", "Ultra 8x" }, 1);
+        qualityAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(state, "quality", qualityCombo);
+
+        // ---- Distortion page --------------------------------------------
         visualizer = std::make_unique<WaveshapeVisualizer>(state);
         visualizer->setBand(1);
 
-        // Per-band knobs (retargeted when the band changes).
         bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "drive"), "DRIVE", pctText));
         bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "tone"),  "TONE",  pctText));
         bandKnobs.push_back(std::make_unique<Knob>(state, perBandId(1, "bias"),  "BIAS",  pctText));
-
-        // Global knobs.
         globalKnobs.push_back(std::make_unique<Knob>(state, "mix",    "MIX",    pctText));
         globalKnobs.push_back(std::make_unique<Knob>(state, "output", "OUTPUT", gainText));
 
-        // Band selector.
         bandLabel.setText("EDIT BAND", juce::dontSendNotification);
         bandLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         bandLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
@@ -323,7 +476,6 @@ private:
         bandCombo.setSelectedId(1);
         bandAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(state, "band", bandCombo);
 
-        // Active-band count selector.
         bandsLabel.setText("BANDS", juce::dontSendNotification);
         bandsLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         bandsLabel.setColour(juce::Label::textColourId, AsunderLookAndFeel::muted);
@@ -339,12 +491,40 @@ private:
         xoverKnobs.push_back(std::make_unique<Knob>(state, "xover3", "X-OVER 3", hzText));
         xoverKnobs.push_back(std::make_unique<Knob>(state, "xover4", "X-OVER 4", hzText));
 
-        const juce::StringArray typeNames { "HARD", "SOFT", "TUBE", "FOLD", "CRUSH", "RATE" };
-        for (int i = 0; i < asunder::kNumDistortionTypes; ++i)
-            typeButtons.push_back(std::make_unique<TypeButton>(typeNames[i], i, state));
+        {
+            const juce::StringArray typeNames { "HARD", "SOFT", "TUBE", "FOLD", "CRUSH", "RATE" };
+            for (int i = 0; i < asunder::kNumDistortionTypes; ++i)
+            {
+                auto tb = std::make_unique<ChoiceButton>(state, perBandId(currentBand(), "type"),
+                                                         typeNames[i], i, AsunderLookAndFeel::accent);
+                typeButtons.push_back(std::move(tb));
+            }
+        }
 
-        // Repaint band controls when the band or its type changes.
+        // ---- Tape page ---------------------------------------------------
+        tapeVis = std::make_unique<TapeVisualizer>(processor);
+
+        {
+            const juce::StringArray colorNames { "TAPE", "TUBE", "FET", "CLASS A" };
+            for (int i = 0; i < asunder::kNumTapeColors; ++i)
+                colorButtons.push_back(std::make_unique<ChoiceButton>(
+                    state, "tapeColor", colorNames[i], i, colourForTape(i), 11.0f));
+        }
+
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeDrive",  "DRIVE",  pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeBias",   "BIAS",   pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeTone",   "TONE",   pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeBump",   "BUMP",   pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapePunch",  "PUNCH",  pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeWow",    "WOW",    pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeNoise",  "HISS",   pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeMix",    "MIX",    pctText));
+        tapeKnobs.push_back(std::make_unique<Knob>(state, "tapeOutput", "OUTPUT", gainText));
+
+        // Live updates.
         state.addParameterListener("band", this);
+        state.addParameterListener("mode", this);
+        state.addParameterListener("tapeColor", this);
         for (int b = 1; b <= asunder::kMaxBands; ++b)
             state.addParameterListener(perBandId(b, "type"), this);
     }
