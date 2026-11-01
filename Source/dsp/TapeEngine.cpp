@@ -185,8 +185,10 @@ namespace asunder
                 {
                     const int sz = static_cast<int> (chan.delay.size());
                     chan.delay[static_cast<size_t> (chan.writePos)] = dry;
+                    // Depth follows Mix: the dry path shares this delay (below), so an
+                    // unscaled wow would stay at full depth with Mix at 0.
                     float readPos = static_cast<float> (chan.writePos)
-                                    - static_cast<float> (baseDelay) + modSamples;
+                                    - static_cast<float> (baseDelay) + modSamples * mix;
                     while (readPos < 0.0f)               readPos += static_cast<float> (sz);
                     while (readPos >= static_cast<float> (sz)) readPos -= static_cast<float> (sz);
                     const int   i0 = static_cast<int> (readPos);
@@ -211,7 +213,9 @@ namespace asunder
                 shaped = chan.toneZ;
 
                 const float wet = shaped * output;
-                const float out = std::clamp (dry * (1.0f - mix) + wet * mix, -1.0f, 1.0f);
+                // Blend against the delayed signal: mixing the undelayed input with a
+                // modulated copy of itself is a flanger.
+                const float out = std::clamp (in * (1.0f - mix) + wet * mix, -1.0f, 1.0f);
                 if (c == 0) outL[s] = out; else outR[s] = out;
             }
         }
